@@ -18,34 +18,31 @@ import (
 
 const CHUNKSIZE int64 = 1024 * 1024
 
-// When checking if file is modified , first we check size and date has been changed , then compute the hash and verify
 type Metadata struct {
-	fileName    string
-	size        int64
-	lastChanged time.Time
-	hash64      string
+	FileName    string
+	Size        int64
+	LastChanged time.Time
+	PartialHash string
 }
+
 type Document struct {
-	numbers  int
-	pages    []Page
-	metadata Metadata
+	PageCount int
+	Pages     []Page
+	Metadata  Metadata
 }
 
 type Page struct {
 	Number int
-	text   string
+	Text   string
 }
 
-// Call this from main loop initially to check if the file needs reindexing / parsing
-// doc is value returned from sqlite fetch
-func needsReindexing(doc *Document, path string) (bool, error) {
+func NeedsReindexing(doc *Document, path string) (bool, error) {
 	if doc == nil {
 		return true, nil
 	}
 
-	//Exists in DB , check if modified
-	lastModified := doc.metadata.lastChanged
-	lastSize := doc.metadata.size
+	lastModified := doc.Metadata.LastChanged
+	lastSize := doc.Metadata.Size
 
 	stats, err := os.Stat(path)
 	if err != nil {
@@ -55,39 +52,40 @@ func needsReindexing(doc *Document, path string) (bool, error) {
 		return true, nil
 	}
 
-	//Check partial hash to confirm if changed
-	lastHash := doc.metadata.hash64
-	currHash, err := computePartialHash(path)
-
+	lastHash := doc.Metadata.PartialHash
+	currHash, err := ComputePartialHash(path)
 	if err != nil {
 		return true, err
 	}
-	return (lastHash == currHash), nil
-
+	return (lastHash != currHash), nil
 }
-func getMetadata(path string) (Metadata, error) {
+
+func GetMetadata(path string) (Metadata, error) {
 	stats, err := os.Stat(path)
 	if err != nil {
-		return Metadata{}, err //Some error occured while fetching stats , we are going to consider this as a new entry
+		return Metadata{}, err
 	}
 	name, err := filepath.Abs(path)
 	if err != nil {
 		return Metadata{}, err
 	}
 
-	m := Metadata{
-		fileName:    name,
-		size:        stats.Size(),
-		lastChanged: stats.ModTime(),
+	hash, err := ComputePartialHash(path)
+	if err != nil {
+		return Metadata{}, err
 	}
 
-	hash, err := computePartialHash(path)
-	m.hash64 = hash
+	m := Metadata{
+		FileName:    name,
+		Size:        stats.Size(),
+		LastChanged: stats.ModTime(),
+		PartialHash: hash,
+	}
 
 	return m, nil
 }
 
-func computePartialHash(path string) (string, error) {
+func ComputePartialHash(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -115,15 +113,12 @@ func computePartialHash(path string) (string, error) {
 
 	buf := make([]byte, CHUNKSIZE)
 
-	if _, err := io.ReadFull(file, buf); err != nil {
+	if _, err := file.ReadAt(buf, 0); err != nil {
 		return "", fmt.Errorf("failed reading head: %w", err)
 	}
 	hasher.Write(buf)
 
-	if _, err := file.Seek(fsz-CHUNKSIZE, io.SeekStart); err != nil {
-		return "", fmt.Errorf("failed seeking tail: %w", err)
-	}
-	if _, err := io.ReadFull(file, buf); err != nil {
+	if _, err := file.ReadAt(buf, fsz-CHUNKSIZE); err != nil {
 		return "", fmt.Errorf("failed reading tail: %w", err)
 	}
 	hasher.Write(buf)
@@ -131,28 +126,22 @@ func computePartialHash(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// Parse's PDF and returns a Document
-// This function should not be called concurrently with getMetadata to avoid multiple file.Open()
 func Parse(path string) (Document, error) {
-	//First we check if this file has already been parsed before , and exists in the user's disk to reduce compuattion and disk i/o
 	pdf.DebugOn = true
 	f, r, err := pdf.Open(path)
 	if err != nil {
 		return Document{}, err
 	}
-	//metadata, isExists := checkFile(path, f)
 	defer f.Close()
-	fileName := f.Name()
-	totalPages := r.NumPage()
 
-	fmt.Printf("FileName = %s Pages = %d \n", fileName, totalPages)
-	pageContents := make([]Page, totalPages)
+	totalPages := r.NumPage()
+	pageContents := make([]Page, 0, totalPages)
 
 	for pageIdx := 1; pageIdx <= totalPages; pageIdx++ {
 		p := r.Page(pageIdx)
 
 		if p.V.IsNull() {
-			continue //Page contains nothin
+			continue
 		}
 		contents, err := p.GetPlainText(nil)
 		if err != nil {
@@ -161,20 +150,21 @@ func Parse(path string) (Document, error) {
 
 		page := Page{
 			Number: pageIdx,
-			text:   contents,
+			Text:   contents,
 		}
 
 		pageContents = append(pageContents, page)
-		fmt.Printf("Page Number = %d  pageContents = %s \n\n", pageIdx, contents)
 	}
-	metadata, err := getMetadata(path)
+
+	metadata, err := GetMetadata(path)
 	if err != nil {
-		fmt.Println("Error occured while computing the metadata ", err)
+		return Document{}, fmt.Errorf("failed to compute metadata: %w", err)
 	}
+
 	d := Document{
-		metadata: metadata,
-		numbers:  totalPages,
-		pages:    pageContents,
+		Metadata:  metadata,
+		PageCount: totalPages,
+		Pages:     pageContents,
 	}
 
 	return d, nil

@@ -16,5 +16,5 @@ func TestParser(t *testing.T) {
 		t.Errorf("Error occured %s", err)
 	}
 
-	fmt.Println("total pages ", d.numbers)
+	fmt.Println("total pages ", d.PageCount)
 }
