@@ -1,8 +1,5 @@
 package parser
 
-//Extract text's from pdf's
-
-//this will take in pdf by path one at a time or through a goroutine and return the text
 import (
 	"crypto/sha256"
 	"encoding/binary"
