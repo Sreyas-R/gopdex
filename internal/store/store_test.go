@@ -2,11 +2,49 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
 	parser "github.com/Sreyas-R/gopdex/internal/parser"
 )
+
+func TestParseAndSave(t *testing.T) {
+	filePath := "/Users/sreyas/Desktop/gopdex/sample"
+	fileName := "lorem.pdf"
+	fileComplete := filePath + "/" + fileName
+	d, err := parser.Parse(fileComplete)
+	fmt.Printf("Doc parsing done - details %v \n", d.Metadata)
+	if err != nil {
+		t.Fatalf("Parsing document failed with err %v", err)
+	}
+
+	needsParsing, err := parser.NeedsReindexing(&d)
+	if needsParsing || err != nil {
+		t.Fatalf("Reparsing required for parsed document - %s", err)
+	}
+	ctx := context.Background()
+
+	db, err := Open("../../db/pdex.db")
+	if err != nil {
+		t.Fatalf("Opening DB Connection failed with err %v", err)
+	}
+
+	err = SaveDocument(ctx, db, &d, fileComplete)
+	if err != nil {
+		t.Fatalf("Error occured while saving the parsed document %v ", err)
+	}
+
+	doc, err := GetDocumentByPath(ctx, db, fileComplete)
+	if err == sql.ErrNoRows {
+		fmt.Printf("No rows or docs there breh")
+	}
+	if doc.PageCount != d.PageCount {
+		t.Fatalf("Page count mismatch - fetched = %d , actual - %d \n", doc.PageCount, d.PageCount)
+	}
+
+}
 
 func TestSaveAndGetDocument(t *testing.T) {
 	db, err := Open("../../db/pdex.db")
@@ -20,8 +58,9 @@ func TestSaveAndGetDocument(t *testing.T) {
 
 	doc := &parser.Document{
 		PageCount: 2,
+		FilePath:  docPath,
 		Metadata: parser.Metadata{
-			FileName:    docPath,
+			FileName:    "test.pdf",
 			Size:        1024,
 			LastChanged: time.Now().Truncate(time.Second),
 			PartialHash: "abc123hash",

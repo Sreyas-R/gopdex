@@ -11,6 +11,16 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type SearchResult struct {
+	DocumentID int64
+	Path       string
+	PageNumber int
+	FileName   string
+	Snippet    string
+	Score      float64 //BM25 Score or rank
+
+}
+
 // First time initialization of tables and triggers
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", path)
@@ -70,7 +80,8 @@ func migrate(db *sql.DB) error {
 		`CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
 			text,
 			content = 'pages',
-			content_rowid = 'id'
+			content_rowid = 'id',
+			tokenize = 'porter unicode61'
 		);`,
 
 		// 4. Triggers to keep pages_fts in sync with pages
@@ -148,6 +159,44 @@ func SaveDocument(ctx context.Context, db *sql.DB, doc *parser.Document, path st
 	}
 
 	return nil
+}
+
+// []Top results by BM25 ranking
+func SearchFTS(ctx context.Context, db *sql.DB, query string) ([]SearchResult, error) {
+	// searchQuery := `SELECT * FROM pages_fts where pages_fts MATCH ? ORDER BY bm25(pages_fts)`
+	//This is quicker when limiting the values returned
+
+	searchQuery := `SELECT
+					p.document_id,
+					d.path,
+					d.file_name,
+					p.page_number,
+					snippet(pages_fts , 0 , '[' , ']' , '...' , 12) AS snippet,
+					bm25(pages_fts) AS score
+				FROM pages_fts
+				JOIN pages on p.id = pages_fts.rowid
+				JOIN documents d on p.document_id = d.id
+				where pages_fts MATCH ?
+				order by SCORE ASC
+				limit 5;
+	`
+
+	rows, err := db.QueryContext(ctx, searchQuery, query)
+	var res []SearchResult
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var curr SearchResult
+		if err := rows.Scan(&curr.DocumentID, &curr.Path, &curr.FileName, &curr.PageNumber, &curr.Snippet, &curr.Score); err != nil {
+			return nil, err
+		}
+		res = append(res, curr)
+	}
+
+	return res, rows.Err()
 }
 
 // GetDocumentByPath retrieves metadata for a document by path. Returns sql.ErrNoRows if not found.

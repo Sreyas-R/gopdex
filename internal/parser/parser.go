@@ -26,6 +26,7 @@ type Document struct {
 	PageCount int
 	Pages     []Page
 	Metadata  Metadata
+	FilePath  string
 }
 
 type Page struct {
@@ -33,11 +34,11 @@ type Page struct {
 	Text   string
 }
 
-func NeedsReindexing(doc *Document, path string) (bool, error) {
+func NeedsReindexing(doc *Document) (bool, error) {
 	if doc == nil {
 		return true, nil
 	}
-
+	path := doc.FilePath
 	lastModified := doc.Metadata.LastChanged
 	lastSize := doc.Metadata.Size
 
@@ -63,6 +64,8 @@ func GetMetadata(path string) (Metadata, error) {
 		return Metadata{}, err
 	}
 	name, err := filepath.Abs(path)
+	_, p := filepath.Split(name)
+	pdfName := p
 	if err != nil {
 		return Metadata{}, err
 	}
@@ -73,7 +76,7 @@ func GetMetadata(path string) (Metadata, error) {
 	}
 
 	m := Metadata{
-		FileName:    name,
+		FileName:    pdfName,
 		Size:        stats.Size(),
 		LastChanged: stats.ModTime(),
 		PartialHash: hash,
@@ -159,6 +162,7 @@ func Parse(path string) (Document, error) {
 	}
 
 	d := Document{
+		FilePath:  path,
 		Metadata:  metadata,
 		PageCount: totalPages,
 		Pages:     pageContents,
