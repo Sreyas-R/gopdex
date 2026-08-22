@@ -89,3 +89,52 @@ func TestSaveAndGetDocument(t *testing.T) {
 		t.Errorf("expected Hash %s, got %s", doc.Metadata.PartialHash, fetched.Metadata.PartialHash)
 	}
 }
+
+func TestSearchFTS(t *testing.T) {
+	db, err := Open("../../db/pdex.db")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	docPath := "/abs/path/to/search_test.pdf"
+
+	doc := &parser.Document{
+		PageCount: 2,
+		FilePath:  docPath,
+		Metadata: parser.Metadata{
+			FileName:    "search_test.pdf",
+			Size:        2048,
+			LastChanged: time.Now().Truncate(time.Second),
+			PartialHash: "searchhash123",
+		},
+		Pages: []parser.Page{
+			{Number: 1, Text: "Private Go indexing engine search test"},
+			{Number: 2, Text: "SQLite FTS5 full text BM25 ranking algorithm snippet preview"},
+		},
+	}
+
+	if err := SaveDocument(ctx, db, doc, docPath); err != nil {
+		t.Fatalf("SaveDocument failed: %v", err)
+	}
+
+	results, err := SearchFTS(ctx, db, "algorithm")
+	if err != nil {
+		t.Fatalf("SearchFTS failed: %v", err)
+	} else {
+		fmt.Printf("Search results = %v \n", results)
+	}
+
+	if len(results) == 0 {
+		t.Fatalf("expected search results for query 'BM25', got 0")
+	}
+
+	if results[0].PageNumber != 2 {
+		t.Errorf("expected match on PageNumber 2, got %d", results[0].PageNumber)
+	}
+
+	if results[0].FileName != "search_test.pdf" {
+		t.Errorf("expected FileName 'search_test.pdf', got %s", results[0].FileName)
+	}
+}

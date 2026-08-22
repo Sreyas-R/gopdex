@@ -69,7 +69,6 @@ func GetMetadata(path string) (Metadata, error) {
 	if err != nil {
 		return Metadata{}, err
 	}
-
 	hash, err := ComputePartialHash(path)
 	if err != nil {
 		return Metadata{}, err
@@ -127,7 +126,7 @@ func ComputePartialHash(path string) (string, error) {
 }
 
 func Parse(path string) (Document, error) {
-	pdf.DebugOn = true
+	// pdf.DebugOn = true
 	f, r, err := pdf.Open(path)
 	if err != nil {
 		return Document{}, err

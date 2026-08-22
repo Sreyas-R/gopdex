@@ -171,14 +171,14 @@ func SearchFTS(ctx context.Context, db *sql.DB, query string) ([]SearchResult, e
 					d.path,
 					d.file_name,
 					p.page_number,
-					snippet(pages_fts , 0 , '[' , ']' , '...' , 12) AS snippet,
+					snippet(pages_fts, 0, '[', ']', '...', 12) AS snippet,
 					bm25(pages_fts) AS score
 				FROM pages_fts
-				JOIN pages on p.id = pages_fts.rowid
-				JOIN documents d on p.document_id = d.id
-				where pages_fts MATCH ?
-				order by SCORE ASC
-				limit 5;
+				JOIN pages p ON p.id = pages_fts.rowid
+				JOIN documents d ON p.document_id = d.id
+				WHERE pages_fts MATCH ?
+				ORDER BY score ASC
+				LIMIT 5;
 	`
 
 	rows, err := db.QueryContext(ctx, searchQuery, query)
@@ -222,6 +222,7 @@ func GetDocumentByPath(ctx context.Context, db *sql.DB, path string) (*parser.Do
 	}
 
 	doc := &parser.Document{
+		FilePath:  path,
 		PageCount: pageCount,
 		Metadata:  m,
 	}
