@@ -4,14 +4,15 @@ A fast CLI/TUI tool written in Go that indexes your local PDFs and lets you sear
 
 ## Features
 
-1. Uses tiered change detection (size/mtime checks followed by partial hashing) to skip unchanged files instantly.
+1.Uses tiered change detection (size/mtime checks followed by partial hashing) to skip unchanged files instantly.
 
 2.Built on SQLite's FTS5 for native BM25-ranked full-text search and snippet generation.
+
 3.An elegant terminal user interface for searching and previewing PDF snippets.
 
 ## Demo
 
-![pdex in action](demo.gif)
+![pdex in action](parsinggif.gif)
 
 
 ## Usage
