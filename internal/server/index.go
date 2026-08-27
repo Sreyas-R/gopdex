@@ -164,3 +164,16 @@ func worker(
 		}
 	}
 }
+
+func Search(ctx context.Context, db *sql.DB, query string) ([]store.SearchResult, error) {
+	if query == "" {
+		return nil, fmt.Errorf("Search query is empty")
+	}
+
+	res, err := store.SearchFTS(ctx, db, query)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}

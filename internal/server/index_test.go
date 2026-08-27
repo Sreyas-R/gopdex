@@ -17,7 +17,8 @@ const sampleDir = "/Users/sreyas/Desktop/gopdex/sample"
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := store.Open("../../db/pdex.db")
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("openTestDB: %v", err)
 	}

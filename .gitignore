@@ -1,3 +1,5 @@
 /sample
 /db
 AGENTS.md
+*.log
+Makefile
