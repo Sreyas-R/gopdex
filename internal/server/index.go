@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io/fs"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -145,6 +146,7 @@ func worker(
 			needsReindexing, _ := parser.NeedsReindexing(existing)
 
 			if !needsReindexing {
+				log.Printf("Skipped parsing PDF (Already indexed & unchanged): %s", path)
 				events <- IndexEvent{
 					EventType: EventSkipped,
 					FileName:  existing.Metadata.FileName,
@@ -153,11 +155,40 @@ func worker(
 				continue
 			}
 
-			doc, err := parser.Parse(path)
+			fileCtx, cancel := context.WithTimeout(ctx, 30*time.Second) // Note: user mentioned 30s previously, setting to 30s.
+
+			type parseRes struct {
+				doc parser.Document
+				err error
+			}
+			resCh := make(chan parseRes, 1)
+
+			log.Printf("Starting to parse PDF: %s", path)
+			
+			go func(p string) {
+				d, e := parser.Parse(p)
+				resCh <- parseRes{doc: d, err: e}
+			}(path)
+
+			var doc parser.Document
+			var err error
+
+			select {
+			case <-fileCtx.Done():
+				err = fmt.Errorf("PDF Corrupted / Too Large!: %w", fileCtx.Err())
+			case res := <-resCh:
+				doc = res.doc
+				err = res.err
+			}
+			cancel()
+
 			if err != nil {
+				log.Printf("Finished parsing PDF: %s (Status: Error - %v)", path, err)
 				events <- IndexEvent{EventType: EventError, FilePath: path, Err: err}
 				continue
 			}
+
+			log.Printf("Finished parsing PDF: %s (Status: Success)", path)
 
 			// hand off to writer — EventIndexed is sent there after DB save succeeds
 			parsed <- parsedResult{doc: &doc, path: path}

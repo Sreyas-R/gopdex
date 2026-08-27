@@ -13,19 +13,23 @@ import (
 )
 
 func main() {
-	f, err := tea.LogToFile("debug.log", "pdex")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not get user home directory: %v\n", err)
+		os.Exit(1)
+	}
+	dbDir := filepath.Join(home, ".pdex")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create config dir: %v\n", err)
+		os.Exit(1)
+	}
+
+	f, err := tea.LogToFile(filepath.Join(dbDir, "debug.log"), "pdex")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not open debug.log: %v\n", err)
 	} else {
 		defer f.Close()
 		log.Println("--- PDEX Session Started ---")
-	}
-
-	dbDir := "./db"
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		log.Printf("failed to create db dir: %v", err)
-		fmt.Fprintf(os.Stderr, "failed to create db dir: %v\n", err)
-		os.Exit(1)
 	}
 
 	dbPath := filepath.Join(dbDir, "pdex.db")

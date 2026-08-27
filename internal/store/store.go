@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	parser "github.com/Sreyas-R/gopdex/internal/parser"
@@ -181,7 +182,8 @@ func SearchFTS(ctx context.Context, db *sql.DB, query string) ([]SearchResult, e
 				LIMIT 5;
 	`
 
-	rows, err := db.QueryContext(ctx, searchQuery, query)
+	formattedQuery := fmt.Sprintf("\"%s\"", strings.ReplaceAll(query, "\"", "\"\""))
+	rows, err := db.QueryContext(ctx, searchQuery, formattedQuery)
 	var res []SearchResult
 	if err != nil {
 		return nil, err

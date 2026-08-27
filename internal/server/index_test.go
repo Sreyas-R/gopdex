@@ -304,3 +304,25 @@ func BenchmarkGetAllPDFs(b *testing.B) {
 		}
 	}
 }
+
+func TestBenchmarkLargePDFs(t *testing.T) {
+	// Create a temporary database that is deleted when the test ends
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	t.Log("Starting to index benchmark PDFs...")
+	start := time.Now()
+
+	indexed := 0
+	// Run the indexer on the sample directory which now contains the large PDFs
+	for ev := range Run(ctx, db, sampleDir, runtime.NumCPU()) {
+		if ev.EventType == EventIndexed {
+			indexed++
+			t.Logf("Successfully indexed: %s", filepath.Base(ev.FilePath))
+		} else if ev.EventType == EventError {
+			t.Errorf("Failed to index %s: %v", ev.FilePath, ev.Err)
+		}
+	}
+
+	t.Logf("Finished indexing %d documents in %v using %d workers", indexed, time.Since(start), runtime.NumCPU())
+}

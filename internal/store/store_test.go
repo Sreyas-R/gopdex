@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func TestParseAndSave(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	db, err := Open("../../db/pdex.db")
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Opening DB Connection failed with err %v", err)
 	}
@@ -47,7 +48,7 @@ func TestParseAndSave(t *testing.T) {
 }
 
 func TestSaveAndGetDocument(t *testing.T) {
-	db, err := Open("../../db/pdex.db")
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestSaveAndGetDocument(t *testing.T) {
 }
 
 func TestSearchFTS(t *testing.T) {
-	db, err := Open("../../db/pdex.db")
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
