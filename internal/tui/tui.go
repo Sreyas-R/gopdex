@@ -8,11 +8,11 @@ import (
 	"os/exec"
 	"runtime"
 
+	"github.com/Sreyas-R/gopdex/internal/server"
+	"github.com/Sreyas-R/gopdex/internal/store"
 	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/Sreyas-R/gopdex/internal/server"
-	"github.com/Sreyas-R/gopdex/internal/store"
 )
 
 type Screen int
@@ -290,6 +290,7 @@ func (m *Model) startIndexing(path string) tea.Cmd {
 
 	log.Printf("[INDEX] Starting indexing on path: %s", path)
 	m.screen = ScreenIndexing
+	//Invokcation of the goroutine and workers start from here
 	m.indexCh = server.Run(m.ctx, m.db, path, runtime.NumCPU())
 	return waitForIndexEvent(m.indexCh)
 }

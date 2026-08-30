@@ -4,3 +4,5 @@ AGENTS.md
 *.log
 Makefile
 scripts
+
+.DS_STORE

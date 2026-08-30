@@ -34,12 +34,6 @@ type IndexEvent struct {
 	Elapsed   time.Duration // non-zero only on EventDiscovered (total walk time)
 }
 
-// Keeping DB writes on a single goroutine avoids concurrent SQLite write errors.
-type parsedResult struct {
-	doc  *parser.Document
-	path string
-}
-
 // GetAllPDFs walks root recursively and returns absolute paths of all .pdf files.
 func GetAllPDFs(root string) ([]string, error) {
 	output := make([]string, 0)
@@ -74,7 +68,7 @@ func Run(ctx context.Context, db *sql.DB, root string, workers int) <-chan Index
 			return
 		}
 		if len(paths) == 0 {
-			ch <- IndexEvent{EventType: EventError, Err: fmt.Errorf("no PDFs found in %s", root)}
+			ch <- IndexEvent{EventType: EventError, Err: fmt.Errorf("No PDFs found in %s", root)}
 			close(ch)
 			return
 		}
@@ -87,33 +81,14 @@ func Run(ctx context.Context, db *sql.DB, root string, workers int) <-chan Index
 		}
 		close(pathsCh)
 
-		parsedResults := make(chan parsedResult, workers)
-
 		var wg sync.WaitGroup
-		// FAN-OUT: N workers parse in parallel
+		// FAN-OUT: N workers parsing pdf's 1 page at a time.
 		for range workers {
 			wg.Add(1)
-			go worker(ctx, db, pathsCh, parsedResults, ch, &wg)
+			go worker(ctx, db, pathsCh, ch, &wg)
 		}
 
-		go func() {
-			wg.Wait()
-			close(parsedResults)
-		}()
-
-		// FAN-IN: serializes all DB saves
-		for res := range parsedResults {
-			if err := store.SaveDocument(ctx, db, res.doc, res.path); err != nil {
-				ch <- IndexEvent{EventType: EventError, FilePath: res.path, Err: err}
-				continue
-			}
-			ch <- IndexEvent{
-				EventType: EventIndexed,
-				FilePath:  res.path,
-				FileName:  res.doc.Metadata.FileName,
-			}
-		}
-
+		wg.Wait()
 		close(ch)
 	}()
 
@@ -124,7 +99,6 @@ func worker(
 	ctx context.Context,
 	db *sql.DB,
 	paths <-chan string,
-	parsed chan<- parsedResult,
 	events chan<- IndexEvent,
 	wg *sync.WaitGroup,
 ) {
@@ -155,43 +129,44 @@ func worker(
 				continue
 			}
 
-			fileCtx, cancel := context.WithTimeout(ctx, 30*time.Second) // Note: user mentioned 30s previously, setting to 30s.
+			metaData, _ := parser.GetMetadata(path)
+			totalPages, _ := parser.GetTotalPages(path)
 
-			type parseRes struct {
-				doc parser.Document
-				err error
+			tx, txerr := db.BeginTx(ctx, nil)
+
+			if txerr != nil {
+				log.Printf("Error occured while beginning transaction for parsing pdf in path %s \n %s ", path, txerr)
+				events <- IndexEvent{EventType: EventError, FilePath: path, Err: txerr}
+				continue
 			}
-			resCh := make(chan parseRes, 1)
-
-			log.Printf("Starting to parse PDF: %s", path)
-			
-			go func(p string) {
-				d, e := parser.Parse(p)
-				resCh <- parseRes{doc: d, err: e}
-			}(path)
-
-			var doc parser.Document
-			var err error
-
-			select {
-			case <-fileCtx.Done():
-				err = fmt.Errorf("PDF Corrupted / Too Large!: %w", fileCtx.Err())
-			case res := <-resCh:
-				doc = res.doc
-				err = res.err
-			}
-			cancel()
-
+			doc_id, err := store.InsertDocument(ctx, tx, metaData, path, totalPages)
 			if err != nil {
-				log.Printf("Finished parsing PDF: %s (Status: Error - %v)", path, err)
+				tx.Rollback()
 				events <- IndexEvent{EventType: EventError, FilePath: path, Err: err}
 				continue
 			}
 
-			log.Printf("Finished parsing PDF: %s (Status: Success)", path)
+			err = parser.ParsePage(path, totalPages, func(p parser.Page) error {
+				return store.SavePage(ctx, tx, doc_id, p)
+			})
 
-			// hand off to writer — EventIndexed is sent there after DB save succeeds
-			parsed <- parsedResult{doc: &doc, path: path}
+			if err != nil {
+				log.Printf("Finished parsing PDF: %s (Status: Error - %v)", path, err)
+				tx.Rollback()
+				events <- IndexEvent{EventType: EventError, FilePath: path, Err: err}
+				continue
+			} else {
+				log.Printf("Finished parsing PDF  , committing transaction %s", path)
+				tx.Commit()
+				//Finished so sent it to events loop?
+				events <- IndexEvent{
+					EventType: EventIndexed,
+					FileName:  metaData.FileName,
+					FilePath:  path,
+				}
+			}
+
+			log.Printf("Finished parsing PDF: %s (Status: Success)", path)
 		}
 	}
 }

@@ -125,6 +125,53 @@ func ComputePartialHash(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+func GetTotalPages(path string) (int, error) {
+	f, r, err := pdf.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return r.NumPage(), nil
+
+}
+func ParsePage(path string, totalPages int, onPage func(Page) error) error {
+
+	batchSize := 50 //50 Pages at once , then closes to free up memory
+	for batchStart := 1; batchStart <= totalPages; batchStart += batchSize {
+		batchEnd := min(batchStart+batchSize-1, totalPages)
+
+		f, r, err := pdf.Open(path)
+		if err != nil {
+			return err
+		}
+
+		for pageIdx := batchStart; pageIdx <= batchEnd; pageIdx++ {
+			p := r.Page(pageIdx)
+
+			if p.V.IsNull() {
+				continue
+			}
+
+			pageContents, _ := p.GetPlainText(nil)
+			if pageContents == "" { //Skip errors or empty pages ew dont care
+				continue
+			}
+
+			page := Page{
+				Number: pageIdx,
+				Text:   pageContents,
+			}
+
+			if err := onPage(page); err != nil {
+				f.Close()
+				return err
+			}
+		}
+		f.Close() //Close and clear memory GC !
+	}
+	return nil
+
+}
 func Parse(path string) (Document, error) {
 	// pdf.DebugOn = true
 	f, r, err := pdf.Open(path)

@@ -30,9 +30,9 @@ func Open(path string) (*sql.DB, error) {
 	}
 
 	// SQLite disables foreign key enforcement by default, per connection.
-	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+	if _, err := db.Exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
+		return nil, fmt.Errorf("enable pragmas: %w", err)
 	}
 
 	if err := migrate(db); err != nil {
@@ -111,6 +111,34 @@ func migrate(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+// Splitting the save document into InsertDocument + SaveDocument in one transaction
+func InsertDocument(ctx context.Context, tx *sql.Tx, meta parser.Metadata, path string, pageCount int) (int64, error) {
+
+	_, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE path = ?`, path)
+	if err != nil {
+		return 0, err
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO documents (path, file_name, size, last_changed, partial_hash, page_count, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		path, meta.FileName, meta.Size, meta.LastChanged, meta.PartialHash, pageCount, time.Now(),
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	return res.LastInsertId()
+}
+
+func SavePage(ctx context.Context, tx *sql.Tx, docID int64, page parser.Page) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO pages (document_id, page_number, text) VALUES (?, ?, ?)`,
+		docID, page.Number, page.Text,
+	)
+	return err
 }
 
 // SaveDocument saves/updates a Document and its Pages in SQLite within a single transaction.
