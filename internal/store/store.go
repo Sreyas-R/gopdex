@@ -18,22 +18,22 @@ type SearchResult struct {
 	PageNumber int
 	FileName   string
 	Snippet    string
-	Score      float64 //BM25 Score or rank
-
+	Score      float64
 }
 
-// First time initialization of tables and triggers
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	// SQLite disables foreign key enforcement by default, per connection.
-	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+	if _, err := db.Exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
+		return nil, fmt.Errorf("enable pragmas: %w", err)
 	}
+
+	db.SetMaxOpenConns(2)
+	db.SetConnMaxLifetime(0)
 
 	if err := migrate(db); err != nil {
 		db.Close()
@@ -43,18 +43,14 @@ func Open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// migrate creates all tables, indexes, virtual tables, and triggers inside a
-// single transaction. Every statement is idempotent (IF NOT EXISTS / OR
-// IGNORE-equivalent), so it's safe to call on every program startup.
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback() // no-op if Commit succeeds
+	defer tx.Rollback()
 
 	statements := []string{
-		// 1. Documents table
 		`CREATE TABLE IF NOT EXISTS documents (
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
 			path         TEXT NOT NULL UNIQUE,
@@ -66,7 +62,6 @@ func migrate(db *sql.DB) error {
 			indexed_at   DATETIME NOT NULL
 		);`,
 
-		// 2. Pages table
 		`CREATE TABLE IF NOT EXISTS pages (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
 			document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -75,7 +70,6 @@ func migrate(db *sql.DB) error {
 			UNIQUE (document_id, page_number)
 		);`,
 
-		// 3. Index + FTS5 virtual table
 		`CREATE INDEX IF NOT EXISTS idx_pages_document_id ON pages(document_id);`,
 
 		`CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
@@ -85,7 +79,6 @@ func migrate(db *sql.DB) error {
 			tokenize = 'porter unicode61'
 		);`,
 
-		// 4. Triggers to keep pages_fts in sync with pages
 		`CREATE TRIGGER IF NOT EXISTS pages_ai AFTER INSERT ON pages BEGIN
 			INSERT INTO pages_fts(rowid, text) VALUES (new.id, new.text);
 		END;`,
@@ -106,67 +99,49 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
-
-	return nil
+	return tx.Commit()
 }
 
-// SaveDocument saves/updates a Document and its Pages in SQLite within a single transaction.
-func SaveDocument(ctx context.Context, db *sql.DB, doc *parser.Document, path string) error {
+// SaveDocument upserts a document and all its pages in one short-lived transaction.
+// Old doc + pages are cascade-deleted first, then fresh rows inserted.
+func SaveDocument(ctx context.Context, db *sql.DB, path string, meta parser.Metadata, totalPages int, pages []parser.Page) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Handle re-indexing: delete existing document if present (ON DELETE CASCADE removes existing pages & triggers update FTS5)
 	_, err = tx.ExecContext(ctx, `DELETE FROM documents WHERE path = ?`, path)
 	if err != nil {
-		return fmt.Errorf("delete old document: %w", err)
+		return fmt.Errorf("delete old doc: %w", err)
 	}
 
-	m := doc.Metadata
-	docInsertQuery := `
-		INSERT INTO documents (path, file_name, size, last_changed, partial_hash, page_count, indexed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`
-	res, err := tx.ExecContext(ctx, docInsertQuery, path, m.FileName, m.Size, m.LastChanged, m.PartialHash, doc.PageCount, time.Now())
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO documents (path, file_name, size, last_changed, partial_hash, page_count, indexed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		path, meta.FileName, meta.Size, meta.LastChanged, meta.PartialHash, totalPages, time.Now())
 	if err != nil {
-		return fmt.Errorf("insert document: %w", err)
+		return fmt.Errorf("insert doc: %w", err)
 	}
 
-	docID, err := res.LastInsertId()
+	docID, _ := res.LastInsertId()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO pages (document_id, page_number, text) VALUES (?, ?, ?)`)
 	if err != nil {
-		return fmt.Errorf("get last insert id: %w", err)
+		return fmt.Errorf("prepare: %w", err)
 	}
+	defer stmt.Close()
 
-	// Bulk insert pages inside transaction
-	pageStmt, err := tx.PrepareContext(ctx, `INSERT INTO pages (document_id, page_number, text) VALUES (?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("prepare page stmt: %w", err)
-	}
-	defer pageStmt.Close()
-
-	for _, page := range doc.Pages {
-		if _, err := pageStmt.ExecContext(ctx, docID, page.Number, page.Text); err != nil {
-			return fmt.Errorf("insert page %d: %w", page.Number, err)
+	for _, p := range pages {
+		if _, err := stmt.ExecContext(ctx, docID, p.Number, p.Text); err != nil {
+			return fmt.Errorf("insert page %d: %w", p.Number, err)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
-
-	return nil
+	return tx.Commit()
 }
 
-// []Top results by BM25 ranking
 func SearchFTS(ctx context.Context, db *sql.DB, query string) ([]SearchResult, error) {
-	// searchQuery := `SELECT * FROM pages_fts where pages_fts MATCH ? ORDER BY bm25(pages_fts)`
-	//This is quicker when limiting the values returned
-
 	searchQuery := `SELECT
 					p.document_id,
 					d.path,
@@ -184,12 +159,12 @@ func SearchFTS(ctx context.Context, db *sql.DB, query string) ([]SearchResult, e
 
 	formattedQuery := fmt.Sprintf("\"%s\"", strings.ReplaceAll(query, "\"", "\"\""))
 	rows, err := db.QueryContext(ctx, searchQuery, formattedQuery)
-	var res []SearchResult
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	var res []SearchResult
 	for rows.Next() {
 		var curr SearchResult
 		if err := rows.Scan(&curr.DocumentID, &curr.Path, &curr.FileName, &curr.PageNumber, &curr.Snippet, &curr.Score); err != nil {
@@ -201,33 +176,47 @@ func SearchFTS(ctx context.Context, db *sql.DB, query string) ([]SearchResult, e
 	return res, rows.Err()
 }
 
-// GetDocumentByPath retrieves metadata for a document by path. Returns sql.ErrNoRows if not found.
 func GetDocumentByPath(ctx context.Context, db *sql.DB, path string) (*parser.Document, error) {
-	query := `
-		SELECT file_name, size, last_changed, partial_hash, page_count
-		FROM documents
-		WHERE path = ?;
-	`
-
 	var m parser.Metadata
 	var pageCount int
 
-	err := db.QueryRowContext(ctx, query, path).Scan(
-		&m.FileName,
-		&m.Size,
-		&m.LastChanged,
-		&m.PartialHash,
-		&pageCount,
-	)
+	err := db.QueryRowContext(ctx,
+		`SELECT file_name, size, last_changed, partial_hash, page_count FROM documents WHERE path = ?`,
+		path).Scan(&m.FileName, &m.Size, &m.LastChanged, &m.PartialHash, &pageCount)
 	if err != nil {
-		return nil, err // Returns sql.ErrNoRows if not found
+		return nil, err
 	}
 
-	doc := &parser.Document{
+	return &parser.Document{
 		FilePath:  path,
 		PageCount: pageCount,
 		Metadata:  m,
-	}
+	}, nil
+}
 
-	return doc, nil
+// GetAllDocuments loads all indexed documents into a map keyed by path.
+// One query replaces N individual GetDocumentByPath calls.
+func GetAllDocuments(ctx context.Context, db *sql.DB) (map[string]*parser.Document, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT path, file_name, size, last_changed, partial_hash, page_count FROM documents`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	docs := make(map[string]*parser.Document)
+	for rows.Next() {
+		var path string
+		var m parser.Metadata
+		var pageCount int
+		if err := rows.Scan(&path, &m.FileName, &m.Size, &m.LastChanged, &m.PartialHash, &pageCount); err != nil {
+			return nil, err
+		}
+		docs[path] = &parser.Document{
+			FilePath:  path,
+			PageCount: pageCount,
+			Metadata:  m,
+		}
+	}
+	return docs, rows.Err()
 }

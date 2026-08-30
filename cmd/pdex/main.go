@@ -12,24 +12,43 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func main() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not get user home directory: %v\n", err)
-		os.Exit(1)
+func findProjectRoot() string {
+	// Walk upwards from current working directory
+	if cwd, err := os.Getwd(); err == nil {
+		for dir := cwd; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				return dir
+			}
+		}
 	}
-	dbDir := filepath.Join(home, ".pdex")
+
+	// Fallback to executable's directory hierarchy
+	if exe, err := os.Executable(); err == nil {
+		for dir := filepath.Dir(exe); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				return dir
+			}
+		}
+	}
+
+	return "."
+}
+
+func main() {
+	baseDir := findProjectRoot()
+	dbDir := filepath.Join(baseDir, "db")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create config dir: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to create db dir: %v\n", err)
 		os.Exit(1)
 	}
 
-	f, err := tea.LogToFile(filepath.Join(dbDir, "debug.log"), "pdex")
+	f, err := tea.LogToFile(filepath.Join(baseDir, "debug.log"), "pdex")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not open debug.log: %v\n", err)
 	} else {
 		defer f.Close()
 		log.Println("--- PDEX Session Started ---")
+		log.Printf("DB Directory: %s", dbDir)
 	}
 
 	dbPath := filepath.Join(dbDir, "pdex.db")

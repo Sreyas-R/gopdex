@@ -8,10 +8,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
-	"github.com/ledongthuc/pdf"
+	"github.com/chappihappymeal/pdf"
 )
+
+var hashBufPool = sync.Pool{
+	New: func() any { return make([]byte, CHUNKSIZE) },
+}
 
 const CHUNKSIZE int64 = 1024 * 1024
 
@@ -34,54 +39,44 @@ type Page struct {
 	Text   string
 }
 
-func NeedsReindexing(doc *Document) (bool, error) {
-	if doc == nil {
-		return true, nil
-	}
-	path := doc.FilePath
-	lastModified := doc.Metadata.LastChanged
-	lastSize := doc.Metadata.Size
-
+func NeedsReindexing(path string, doc *Document) (bool, Metadata, error) {
 	stats, err := os.Stat(path)
 	if err != nil {
-		return true, err
-	}
-	if lastSize != stats.Size() || !(stats.ModTime().Equal(lastModified)) {
-		return true, nil
+		return true, Metadata{}, err
 	}
 
-	lastHash := doc.Metadata.PartialHash
-	currHash, err := ComputePartialHash(path)
-	if err != nil {
-		return true, err
-	}
-	return (lastHash != currHash), nil
-}
-
-func GetMetadata(path string) (Metadata, error) {
-	stats, err := os.Stat(path)
-	if err != nil {
-		return Metadata{}, err
-	}
-	name, err := filepath.Abs(path)
-	_, p := filepath.Split(name)
-	pdfName := p
-	if err != nil {
-		return Metadata{}, err
-	}
-	hash, err := ComputePartialHash(path)
-	if err != nil {
-		return Metadata{}, err
-	}
+	name, _ := filepath.Abs(path)
+	_, pdfName := filepath.Split(name)
 
 	m := Metadata{
 		FileName:    pdfName,
 		Size:        stats.Size(),
 		LastChanged: stats.ModTime(),
-		PartialHash: hash,
 	}
 
-	return m, nil
+	// First-time index: skip hash comparison, just compute for storage
+	if doc == nil {
+		m.PartialHash, _ = ComputePartialHash(path)
+		return true, m, nil
+	}
+
+	// Tier 1: size/mtime changed → definitely need reindex
+	if doc.Metadata.Size != m.Size || !doc.Metadata.LastChanged.Equal(m.LastChanged) {
+		m.PartialHash, _ = ComputePartialHash(path)
+		return true, m, nil
+	}
+
+	currHash, err := ComputePartialHash(path)
+	if err != nil {
+		return true, m, err
+	}
+	m.PartialHash = currHash
+
+	if doc.Metadata.PartialHash != currHash {
+		return true, m, nil
+	}
+
+	return false, m, nil
 }
 
 func ComputePartialHash(path string) (string, error) {
@@ -110,7 +105,8 @@ func ComputePartialHash(path string) (string, error) {
 		return hex.EncodeToString(hasher.Sum(nil)), nil
 	}
 
-	buf := make([]byte, CHUNKSIZE)
+	buf := hashBufPool.Get().([]byte)
+	defer hashBufPool.Put(buf)
 
 	if _, err := file.ReadAt(buf, 0); err != nil {
 		return "", fmt.Errorf("failed reading head: %w", err)
@@ -125,47 +121,40 @@ func ComputePartialHash(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func Parse(path string) (Document, error) {
-	// pdf.DebugOn = true
+// ParseFile opens the PDF once to get totalPages, then parses in 50-page
+func ParseFile(path string) ([]Page, int, error) {
 	f, r, err := pdf.Open(path)
 	if err != nil {
-		return Document{}, err
+		return nil, 0, err
 	}
-	defer f.Close()
-
 	totalPages := r.NumPage()
-	pageContents := make([]Page, 0, totalPages)
+	f.Close()
 
-	for pageIdx := 1; pageIdx <= totalPages; pageIdx++ {
-		p := r.Page(pageIdx)
+	pages := make([]Page, 0, totalPages)
+	batchSize := 50
+	for batchStart := 1; batchStart <= totalPages; batchStart += batchSize {
+		batchEnd := min(batchStart+batchSize-1, totalPages)
 
-		if p.V.IsNull() {
-			continue
-		}
-		contents, err := p.GetPlainText(nil)
+		f, r, err := pdf.Open(path)
 		if err != nil {
-			return Document{}, err
+			return pages, totalPages, err
 		}
 
-		page := Page{
-			Number: pageIdx,
-			Text:   contents,
+		for pageIdx := batchStart; pageIdx <= batchEnd; pageIdx++ {
+			p := r.Page(pageIdx)
+			if p.V.IsNull() {
+				continue
+			}
+
+			text, _ := p.GetPlainText(nil)
+			if text == "" {
+				continue
+			}
+
+			pages = append(pages, Page{Number: pageIdx, Text: text})
 		}
-
-		pageContents = append(pageContents, page)
+		f.Close()
 	}
 
-	metadata, err := GetMetadata(path)
-	if err != nil {
-		return Document{}, fmt.Errorf("failed to compute metadata: %w", err)
-	}
-
-	d := Document{
-		FilePath:  path,
-		Metadata:  metadata,
-		PageCount: totalPages,
-		Pages:     pageContents,
-	}
-
-	return d, nil
+	return pages, totalPages, nil
 }
